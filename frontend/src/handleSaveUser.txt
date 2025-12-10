@@ -1,0 +1,14 @@
+  const handleSaveUser = async (userData) => {
+    try {
+      if (selectedItem) {
+        await api.users.update(selectedItem.id, userData);
+      } else {
+        await api.users.create({ ...userData, role: 'tenant' });
+      }
+      await loadData();
+      setShowModal(false);
+    } catch (error) {
+      console.error('Failed to save user:', error);
+      alert('Failed to save user');
+    }
+  };

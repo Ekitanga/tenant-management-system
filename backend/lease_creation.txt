@@ -1,0 +1,1 @@
+router.post('/leases', authMiddleware, blockSuperAdminOperations, (req, res) => {
