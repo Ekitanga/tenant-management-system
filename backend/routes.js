@@ -71,7 +71,26 @@ router.post('/auth/login', (req, res) => {
 // Get current user
 router.get('/auth/me', authMiddleware, (req, res) => {
   try {
-    const user = db.prepare('SELECT id, username, email, role, is_active FROM users WHERE id = ?').get(req.user.id);
+    console.log('🔍 AUTH CHECK - User ID:', req.userId);
+    
+    const userQuery = `
+      SELECT 
+        u.id, 
+        u.username, 
+        u.email, 
+        u.role,
+        u.is_active,
+        t.id AS tenant_id,
+        t.phone,
+        t.full_name
+      FROM users u
+      LEFT JOIN tenants t ON u.id = t.user_id
+      WHERE u.id = ?
+    `;
+    
+    console.log('🔍 Running query...');
+    const user = db.prepare(userQuery).get(req.userId);
+    console.log('✅ Query result:', JSON.stringify(user, null, 2));
     
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -79,8 +98,9 @@ router.get('/auth/me', authMiddleware, (req, res) => {
 
     res.json({ user });
   } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ error: 'Failed to get user' });
+    console.error('❌ Auth error:', error.message);
+    console.error('❌ Full error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -1937,116 +1957,7 @@ router.get('/reports/revenue', authMiddleware, roleMiddleware('admin', 'landlord
 // M-PESA STK PUSH
 // ============================================
 
-router.post('/mpesa/stk-push', authMiddleware, async (req, res) => {
-  try {
-    const { phone, amount, lease_id } = req.body;
 
-    if (!phone || !amount || !lease_id) {
-      return res.status(400).json({ error: 'Phone, amount, and lease ID are required' });
-    }
-
-    // Get M-PESA credentials from environment
-    const MPESA_CONSUMER_KEY = process.env.MPESA_CONSUMER_KEY;
-    const MPESA_CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET;
-    const MPESA_SHORTCODE = process.env.MPESA_SHORTCODE;
-    const MPESA_PASSKEY = process.env.MPESA_PASSKEY;
-    const MPESA_CALLBACK_URL = process.env.MPESA_CALLBACK_URL || 'https://yourdomain.com/api/mpesa/callback';
-
-    if (!MPESA_CONSUMER_KEY || !MPESA_CONSUMER_SECRET) {
-      return res.status(500).json({ error: 'M-PESA credentials not configured' });
-    }
-
-    // Get access token
-    const auth = Buffer.from(`${MPESA_CONSUMER_KEY}:${MPESA_CONSUMER_SECRET}`).toString('base64');
-    const tokenResponse = await axios.get('https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials', {
-      headers: { Authorization: `Basic ${auth}` }
-    });
-
-    const accessToken = tokenResponse.data.access_token;
-
-    // Generate timestamp and password
-    const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, -3);
-    const password = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`).toString('base64');
-
-    // Format phone number
-    const formattedPhone = phone.replace(/^0/, '254').replace(/\+/, '');
-
-    // STK Push request
-    const stkResponse = await axios.post(
-      'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
-      {
-        BusinessShortCode: MPESA_SHORTCODE,
-        Password: password,
-        Timestamp: timestamp,
-        TransactionType: 'CustomerPayBillOnline',
-        Amount: amount,
-        PartyA: formattedPhone,
-        PartyB: MPESA_SHORTCODE,
-        PhoneNumber: formattedPhone,
-        CallBackURL: MPESA_CALLBACK_URL,
-        AccountReference: `LEASE-${lease_id}`,
-        TransactionDesc: 'Rent Payment'
-      },
-      {
-        headers: { Authorization: `Bearer ${accessToken}` }
-      }
-    );
-
-    console.log('✅ M-PESA STK Push initiated:', stkResponse.data.CheckoutRequestID);
-
-    res.json({
-      success: true,
-      message: 'Payment request sent to phone',
-      checkoutRequestId: stkResponse.data.CheckoutRequestID
-    });
-
-  } catch (error) {
-    console.error('❌ M-PESA STK Push error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to initiate payment', details: error.response?.data || error.message });
-  }
-});
-
-// M-PESA Callback
-router.post('/mpesa/callback', (req, res) => {
-  try {
-    console.log('📥 M-PESA Callback received:', JSON.stringify(req.body, null, 2));
-
-    const { Body } = req.body;
-    
-    if (Body && Body.stkCallback) {
-      const { ResultCode, ResultDesc, CallbackMetadata } = Body.stkCallback;
-
-      if (ResultCode === 0) {
-        // Payment successful
-        const metadata = {};
-        CallbackMetadata.Item.forEach(item => {
-          metadata[item.Name] = item.Value;
-        });
-
-        const { Amount, MpesaReceiptNumber, PhoneNumber } = metadata;
-
-        console.log('✅ Payment successful:', {
-          amount: Amount,
-          receipt: MpesaReceiptNumber,
-          phone: PhoneNumber
-        });
-
-        // Auto-create payment record
-        // Extract lease_id from AccountReference if available
-        // For now, just log it - you can enhance this to auto-record
-
-      } else {
-        console.log('❌ Payment failed:', ResultDesc);
-      }
-    }
-
-    res.json({ ResultCode: 0, ResultDesc: 'Success' });
-
-  } catch (error) {
-    console.error('Callback error:', error);
-    res.json({ ResultCode: 1, ResultDesc: 'Failed' });
-  }
-});
 
 // ============================================
 // SMS INTEGRATION (BONGA SMS)
@@ -3054,5 +2965,272 @@ router.get('/debug/my-data', authMiddleware, (req, res) => {
   }
 });
 
-module.exports = router;
 
+// ============================================
+// M-PESA ROUTES
+// ============================================
+
+// ============================================
+// M-PESA ROUTES
+// ============================================
+
+const mpesaService = require('./mpesa-service');
+
+router.post('/mpesa/stk-push', authMiddleware, async (req, res) => {
+  try {
+    console.log('💰 STK Push route HIT');
+    console.log('📦 req.body:', req.body);
+    console.log('📦 req.body keys:', Object.keys(req.body));
+    
+    const { phone_number, amount, lease_id, account_reference, transaction_desc } = req.body;
+    
+    console.log('📞 phone_number:', phone_number);
+    console.log('💵 amount:', amount);
+    console.log('📄 lease_id:', lease_id);
+    
+    if (!phone_number || !amount || !lease_id) {
+      console.log('❌ VALIDATION FAILED');
+      return res.status(400).json({ 
+        error: 'Phone, amount, and lease ID are required',
+        received: { phone_number, amount, lease_id }
+      });
+    }
+    
+    // Get tenant_id from lease
+    const lease = db.prepare('SELECT tenant_id FROM leases WHERE id = ?').get(lease_id);
+    if (!lease) {
+      return res.status(404).json({ error: 'Lease not found' });
+    }
+    
+    // Create transaction record
+    const transaction = db.prepare(`
+      INSERT INTO mpesa_transactions 
+      (lease_id, tenant_id, phone_number, amount, account_reference, transaction_desc, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending')
+    `).run(lease_id, lease.tenant_id, phone_number, amount, account_reference, transaction_desc);
+    
+    console.log('✅ Transaction record created:', transaction.lastInsertRowid);
+    
+    // Initiate STK Push
+const response = await mpesaService.stkPush({
+  phoneNumber: phone_number,
+  amount: amount,
+  accountReference: account_reference,
+  transactionDesc: transaction_desc
+});
+    
+console.log('✅ M-PESA API response:', response);
+
+// Check if successful
+if (!response.success) {
+  console.error('❌ M-PESA service failed:', response.error);
+  return res.status(500).json({
+    success: false,
+    error: response.error || 'Failed to initiate M-PESA payment',
+    details: response.details
+  });
+}
+
+// Update transaction with M-PESA IDs
+db.prepare(`
+  UPDATE mpesa_transactions 
+  SET merchant_request_id = ?, checkout_request_id = ?
+  WHERE id = ?
+`).run(
+  response.merchantRequestId,    // ← Lowercase 'merchantRequestId'
+  response.checkoutRequestId,    // ← Lowercase 'checkoutRequestId'
+  transaction.lastInsertRowid
+);
+
+res.json({
+  success: true,
+  transactionId: transaction.lastInsertRowid,
+  checkoutRequestId: response.checkoutRequestId,
+  message: response.customerMessage || 'STK Push sent successfully'
+});
+    
+  } catch (error) {
+    console.error('❌ STK Push error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to initiate M-PESA payment'
+    });
+  }
+});
+
+router.post('/mpesa/callback', async (req, res) => {
+  try {
+    console.log('📞 ===== M-PESA CALLBACK RECEIVED =====');
+    console.log(JSON.stringify(req.body, null, 2));
+    console.log('=====================================');
+
+    const { Body } = req.body;
+    const stkCallback = Body?.stkCallback;
+
+    if (!stkCallback) {
+      console.log('⚠️ Invalid callback format - no stkCallback found');
+      return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+    }
+
+    const { MerchantRequestID, CheckoutRequestID, ResultCode, ResultDesc } = stkCallback;
+
+    console.log('🔍 Processing callback:', {
+      MerchantRequestID,
+      CheckoutRequestID,
+      ResultCode,
+      ResultDesc
+    });
+
+    // Find transaction by CheckoutRequestID
+    const transaction = db.prepare(`
+      SELECT * FROM mpesa_transactions 
+      WHERE checkout_request_id = ?
+    `).get(CheckoutRequestID);
+
+    if (!transaction) {
+      console.log('⚠️ Transaction not found for CheckoutRequestID:', CheckoutRequestID);
+      return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+    }
+
+    console.log('✅ Transaction found:', transaction.id);
+
+    // ResultCode 0 = Success
+    if (ResultCode === 0) {
+      console.log('✅ Payment was SUCCESSFUL');
+
+      const callbackMetadata = stkCallback.CallbackMetadata?.Item || [];
+      console.log('📦 Callback metadata items:', callbackMetadata.length);
+
+      const mpesaReceiptNumber = callbackMetadata.find(item => item.Name === 'MpesaReceiptNumber')?.Value;
+      const transactionDate = callbackMetadata.find(item => item.Name === 'TransactionDate')?.Value;
+      const phoneNumber = callbackMetadata.find(item => item.Name === 'PhoneNumber')?.Value;
+      const amount = callbackMetadata.find(item => item.Name === 'Amount')?.Value;
+
+      console.log('💰 Payment details:', {
+        receipt: mpesaReceiptNumber,
+        amount: amount,
+        phone: phoneNumber,
+        date: transactionDate
+      });
+
+      // Update M-PESA transaction to completed
+      db.prepare(`
+        UPDATE mpesa_transactions 
+        SET status = 'completed',
+            mpesa_receipt_number = ?,
+            transaction_date = CURRENT_TIMESTAMP,
+            result_code = ?,
+            result_desc = ?,
+            callback_received = 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(mpesaReceiptNumber, ResultCode, ResultDesc, transaction.id);
+
+      console.log('✅ M-PESA transaction updated to completed');
+
+      // Create payment record
+      if (transaction.lease_id) {
+        try {
+          const paymentResult = db.prepare(`
+            INSERT INTO payments 
+            (lease_id, amount, payment_date, payment_method, reference_number, notes, status)
+            VALUES (?, ?, ?, 'mpesa', ?, ?, 'completed')
+          `).run(
+            transaction.lease_id,
+            amount,
+            new Date().toISOString().split('T')[0],
+            mpesaReceiptNumber,
+            `M-PESA Payment - ${mpesaReceiptNumber}`
+          );
+
+          console.log('✅ Payment record created:', paymentResult.lastInsertRowid);
+
+          // Emit socket events
+          const io = req.app.get('io');
+          if (io) {
+            console.log('📡 Emitting socket events...');
+            io.emit('payment:created', { 
+              leaseId: transaction.lease_id, 
+              amount: amount,
+              receipt: mpesaReceiptNumber 
+            });
+            io.emit('dashboard:refresh');
+          }
+
+        } catch (paymentError) {
+          console.error('⚠️ Failed to create payment record:', paymentError);
+          console.error('⚠️ Error details:', paymentError.message);
+        }
+      } else {
+        console.log('⚠️ No lease_id associated with transaction');
+      }
+
+    } else {
+      // Payment failed or cancelled
+      console.log('❌ Payment FAILED or CANCELLED');
+      console.log('❌ Result Code:', ResultCode);
+      console.log('❌ Result Description:', ResultDesc);
+
+      db.prepare(`
+        UPDATE mpesa_transactions 
+        SET status = 'failed',
+            result_code = ?,
+            result_desc = ?,
+            callback_received = 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(ResultCode, ResultDesc, transaction.id);
+
+      console.log('✅ Transaction marked as failed');
+    }
+
+    // Always return success to Safaricom
+    res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+
+  } catch (error) {
+    console.error('❌ Callback processing error:', error);
+    console.error('❌ Error stack:', error.stack);
+    // Still return success to avoid Safaricom retries
+    res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+  }
+});
+
+// Get M-PESA transaction status by ID
+router.get('/mpesa/transaction/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    console.log(`📊 Fetching transaction status for ID: ${id}`);
+    
+    const transaction = db.prepare(`
+      SELECT * FROM mpesa_transactions 
+      WHERE id = ?
+    `).get(id);
+    
+    if (!transaction) {
+      console.log(`❌ Transaction ${id} not found`);
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Transaction not found' 
+      });
+    }
+    
+    console.log(`✅ Transaction ${id} status: ${transaction.status}`);
+    
+    res.json({
+      success: true,
+      transaction: transaction
+    });
+    
+  } catch (error) {
+    console.error('❌ Error fetching transaction:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch transaction status',
+      error: error.message 
+    });
+  }
+});
+
+
+module.exports = router;

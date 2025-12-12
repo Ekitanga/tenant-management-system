@@ -56,6 +56,11 @@ function App() {
   const [showUserForm, setShowUserForm] = useState(false);
   const [showLeasePreview, setShowLeasePreview] = useState(false);
   const [selectedLease, setSelectedLease] = useState(null);
+  // M-PESA states
+  const [showMpesaModal, setShowMpesaModal] = useState(false);
+  const [mpesaForm, setMpesaForm] = useState({ phone: '', amount: '', lease_id: '' });
+  const [mpesaStatus, setMpesaStatus] = useState(null);
+  const [mpesaTransactionId, setMpesaTransactionId] = useState(null);
   // Edit states
 const [editingProperty, setEditingProperty] = useState(null);
 const [editingUnit, setEditingUnit] = useState(null);
@@ -677,6 +682,132 @@ const handleSendRentReminders = async () => {
 };
 
 
+// M-PESA Payment Handler
+const handleMpesaPayment = async (e) => {
+  e.preventDefault();
+  
+  console.log('📤 Submitting M-PESA payment...');
+  console.log('Form data:', mpesaForm);
+  
+  // Validate
+  if (!mpesaForm.phone || !mpesaForm.amount || !mpesaForm.lease_id) {
+    alert('⚠️ Missing required fields');
+    return;
+  }
+  
+  try {
+    setMpesaStatus({ type: 'loading', message: 'Initiating payment...' });
+    
+    const token = localStorage.getItem('token');
+    const response = await fetch('http://localhost:5000/api/mpesa/stk-push', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        phone_number: mpesaForm.phone,
+        amount: mpesaForm.amount,
+        lease_id: mpesaForm.lease_id,
+        account_reference: `Rent-${mpesaForm.lease_id}`,
+        transaction_desc: 'Rent Payment'
+      })
+    });
+
+    const data = await response.json();
+    console.log('📥 Backend response:', data);
+
+    if (data.success) {
+      setMpesaTransactionId(data.transactionId);
+      setMpesaStatus({ 
+        type: 'success', 
+        message: 'Payment request sent! Please check your phone and enter your M-PESA PIN.' 
+      });
+      
+      pollPaymentStatus(data.transactionId);
+      
+    } else {
+      console.error('❌ Backend error:', data);
+      setMpesaStatus({ 
+        type: 'error', 
+        message: data.error || 'Failed to initiate payment' 
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ M-PESA payment error:', error);
+    setMpesaStatus({ 
+      type: 'error', 
+      message: 'Failed to initiate payment. Please try again.' 
+    });
+  }
+};
+
+// Poll payment status
+const pollPaymentStatus = async (transactionId) => {
+  let attempts = 0;
+  const maxAttempts = 30;
+  
+  const interval = setInterval(async () => {
+    attempts++;
+    
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`http://localhost:5000/api/mpesa/transaction/${transactionId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      
+      const data = await response.json();
+      const transaction = data.transaction;
+      
+if (transaction.status === 'completed') {
+  clearInterval(interval);
+  
+  // Show success message
+  setMpesaStatus({ 
+    type: 'success', 
+    message: `✅ Payment Successful!\n\nReceipt Number: ${transaction.mpesa_receipt_number}\nAmount: KES ${transaction.amount}\n\nWindow will close in 3 seconds...` 
+  });
+  
+  console.log('✅ Payment completed successfully!');
+  
+  // Auto-close after 3 seconds and refresh data
+  setTimeout(() => {
+    console.log('🔄 Closing modal and refreshing data...');
+    setShowMpesaModal(false);
+    setMpesaStatus(null);
+    setMpesaForm({ phone: '', amount: '', lease_id: '' });
+    fetchPayments();
+    fetchDashboardStats();
+    if (activeTab === 'my-leases') {
+      fetchLeases();
+    }
+    
+    // Show a final confirmation
+    alert('✅ Payment of KES ' + transaction.amount + ' received!\n\nReceipt: ' + transaction.mpesa_receipt_number);
+  }, 3000);
+        
+      } else if (transaction.status === 'failed') {
+        clearInterval(interval);
+        setMpesaStatus({ 
+          type: 'error', 
+          message: `❌ Payment failed: ${transaction.result_desc}` 
+        });
+        
+      } else if (attempts >= maxAttempts) {
+        clearInterval(interval);
+        setMpesaStatus({ 
+          type: 'warning', 
+          message: '⏱️ Payment pending. Please check your payment status in a few minutes.' 
+        });
+      }
+      
+    } catch (error) {
+      console.error('Status poll error:', error);
+    }
+  }, 2000); // Poll every 2 seconds
+};
+
 // Edit handlers
 const handleEditProperty = (property) => {
   setEditingProperty(property);
@@ -939,7 +1070,8 @@ const handleUnitSelection = (e) => {
         { key: 'maintenance', label: 'Maintenance', icon: '🔧' },
         { key: 'reports', label: 'Reports', icon: '📈' },
         { key: 'sms', label: 'SMS Reminders', icon: '📱' },  // ADD THIS LINE
-      ];
+       { key: 'mpesa', label: 'M-PESA Transactions', icon: '💳' },  // ADD THIS
+  ];
     }
 
     if (user.role === 'tenant') {
@@ -1487,6 +1619,52 @@ const handleUnitSelection = (e) => {
   <div>
     <div className="flex justify-between items-center mb-6">
       <h2 className="text-2xl font-bold">Payments</h2>
+      
+      {/* TENANT: Pay Rent Button */}
+{user.role === 'tenant' && (
+  <button
+    onClick={() => {
+      // Debug logs
+      console.log('🔍 FULL USER OBJECT:', user);
+      console.log('🔍 user.tenant_id:', user.tenant_id);
+      console.log('🔍 user.phone:', user.phone);
+      console.log('🔍 user.email:', user.email);
+      
+      // Find active lease
+      const activeLease = leases.find(l => {
+        const match = l.status === 'active' && l.tenant_id === user.tenant_id;
+        console.log(`Lease ${l.id}: tenant_id=${l.tenant_id}, user.tenant_id=${user.tenant_id}, match=${match}`);
+        return match;
+      });
+      
+      console.log('FOUND LEASE:', activeLease);
+      
+      if (!activeLease) {
+        alert('ERROR: No active lease found\n\n' +
+              'User tenant_id: ' + user.tenant_id + '\n' +
+              'User email: ' + user.email + '\n\n' +
+              'Check console for details');
+        return;
+      }
+      
+      const formData = {
+        phone: user.phone || '',
+        amount: String(activeLease.rent_amount),
+        lease_id: String(activeLease.id)
+      };
+      
+      console.log('FORM DATA:', formData);
+      
+      setMpesaForm(formData);
+      setShowMpesaModal(true);
+    }}
+    className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition font-semibold flex items-center gap-2"
+  >
+    <span className="text-xl">💰</span> Pay Rent via M-PESA
+  </button>
+)}
+      
+      {/* LANDLORD/ADMIN: Reminders & Record Payment */}
       {['admin', 'landlord'].includes(user.role) && (
         <div className="flex gap-3">
           <button
@@ -1807,6 +1985,9 @@ const handleUnitSelection = (e) => {
               alert('Error checking balance: ' + error.message);
             }
           }}
+
+          
+          
           className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition font-semibold"
         >
           Check Balance
@@ -1814,6 +1995,37 @@ const handleUnitSelection = (e) => {
       </div>
     </div>
     {/* SMS Balance Card ENDS */}
+
+
+{/* M-PESA TRANSACTIONS TAB */}
+{activeTab === 'mpesa' && (
+  <div>
+    <h2 className="text-3xl font-bold mb-6">💳 M-PESA Transactions</h2>
+    
+    <div className="bg-white rounded-lg shadow overflow-hidden">
+      <table className="w-full">
+        <thead className="bg-green-600 text-white">
+          <tr>
+            <th className="px-6 py-3 text-left">Date</th>
+            <th className="px-6 py-3 text-left">Tenant</th>
+            <th className="px-6 py-3 text-left">Phone</th>
+            <th className="px-6 py-3 text-left">Amount</th>
+            <th className="px-6 py-3 text-left">Receipt</th>
+            <th className="px-6 py-3 text-left">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td colSpan="6" className="px-6 py-8 text-center text-gray-500">
+              No M-PESA transactions yet. Transactions will appear here once tenants make payments.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+)}
+
     
     {/* Send Bulk Rent Reminders Card - YOUR EXISTING CODE CONTINUES HERE */}
     <div className="bg-white rounded-xl shadow-lg p-8 mb-6">
@@ -2606,6 +2818,129 @@ const handleUnitSelection = (e) => {
           </div>
         </div>
       )}
+
+      {/* M-PESA Payment Modal */}
+      {showMpesaModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-2xl font-bold text-gray-800">💰 Pay via M-PESA</h3>
+              <button
+                onClick={() => {
+                  setShowMpesaModal(false);
+                  setMpesaStatus(null);
+                  setMpesaForm({ phone: '', amount: '', lease_id: '' });
+                }}
+                className="text-gray-500 hover:text-gray-700 text-3xl font-bold"
+              >
+                ×
+              </button>
+            </div>
+
+{mpesaStatus && (
+  <div className={`p-4 rounded-lg mb-4 ${
+    mpesaStatus.type === 'success' ? 'bg-green-100 border-2 border-green-500' :
+    mpesaStatus.type === 'error' ? 'bg-red-50 border border-red-200' :
+    mpesaStatus.type === 'warning' ? 'bg-yellow-50 border border-yellow-200' :
+    'bg-blue-50 border border-blue-200'
+  }`}>
+    <p className={`text-sm whitespace-pre-line ${
+      mpesaStatus.type === 'success' ? 'text-green-800 font-bold text-base' :
+      mpesaStatus.type === 'error' ? 'text-red-800' :
+      mpesaStatus.type === 'warning' ? 'text-yellow-800' :
+      'text-blue-800'
+    }`}>
+      {mpesaStatus.message}
+    </p>
+                {mpesaStatus.type === 'loading' && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+                    <span className="text-sm text-blue-700">Processing...</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <form onSubmit={handleMpesaPayment}>
+              <div className="mb-4">
+                <label className="block text-sm font-semibold mb-2">Phone Number *</label>
+                <input
+                  type="tel"
+                  value={mpesaForm.phone}
+                  onChange={(e) => setMpesaForm({ ...mpesaForm, phone: e.target.value })}
+                  className="w-full border-2 border-gray-300 rounded-lg px-4 py-3 focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                  placeholder="0712345678 or 254712345678"
+                  required
+                  disabled={mpesaStatus?.type === 'loading'}
+                />
+                <p className="text-xs text-gray-500 mt-1">Enter the M-PESA number to receive payment prompt</p>
+              </div>
+
+              <div className="mb-4">
+                <label className="block text-sm font-semibold mb-2">Amount (KES) *</label>
+                <input
+                  type="number"
+                  value={mpesaForm.amount}
+                  onChange={(e) => setMpesaForm({ ...mpesaForm, amount: e.target.value })}
+                  className="w-full border-2 border-gray-300 rounded-lg px-4 py-3 focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                  placeholder="10"
+                  min="1"
+                  required
+                  disabled={mpesaStatus?.type === 'loading'}
+                />
+              </div>
+
+              <div className="bg-green-50 border-l-4 border-green-500 p-4 mb-4 rounded">
+                <p className="text-sm text-green-800">
+                  <strong>How it works:</strong>
+                </p>
+                <ol className="text-xs text-green-700 mt-2 space-y-1 ml-4 list-decimal">
+                  <li>Click "Send Payment Request"</li>
+                  <li>Check your phone for M-PESA prompt</li>
+                  <li>Enter your M-PESA PIN</li>
+                  <li>Payment will be recorded automatically</li>
+                </ol>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  type="submit"
+                  className="flex-1 bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 font-semibold disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  disabled={mpesaStatus?.type === 'loading'}
+                >
+                  {mpesaStatus?.type === 'loading' ? (
+                    <>
+                      <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                      Processing...
+                    </>
+                  ) : (
+                    <>📱 Send Payment Request</>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowMpesaModal(false);
+                    setMpesaStatus(null);
+                    setMpesaForm({ phone: '', amount: '', lease_id: '' });
+                  }}
+                  className="px-6 py-3 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 font-semibold"
+                  disabled={mpesaStatus?.type === 'loading'}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+
+            <div className="mt-4 text-center">
+              <p className="text-xs text-gray-500">
+                Powered by M-PESA | Paybill: 4182789
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+      
     </div>
   );
 }
