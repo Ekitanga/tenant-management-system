@@ -1187,19 +1187,65 @@ const handleUnitSelection = (e) => {
         {/* Main Content */}
         <main className="flex-1 p-6">
           {/* DASHBOARD TAB */}
- {activeTab === 'dashboard' && (
+{activeTab === 'dashboard' && (
   <div>
     {user.role === 'tenant' ? (
       <TenantDashboard />
     ) : (
       <div>
         <h2 className="text-3xl font-bold mb-6">Dashboard</h2>
+        
+        {/* C2B BUTTON */}
+        {user.role === 'admin' && (
+          <div className="mb-6 bg-gradient-to-r from-purple-50 to-indigo-50 rounded-xl shadow-lg p-6 border-l-4 border-purple-600">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className="text-5xl">🔧</div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-800">M-PESA C2B Setup</h3>
+                  <p className="text-sm text-gray-600">Enable automatic processing of manual PayBill payments</p>
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  if (!window.confirm('Register C2B URLs with M-PESA?\n\nThis allows manual PayBill payments to automatically update the system.\n\n⚠️ Only do this ONCE when setting up.')) {
+                    return;
+                  }
+                  
+                  try {
+                    const token = localStorage.getItem('token');
+                    const response = await fetch('http://localhost:5000/api/mpesa/c2b/register', {
+                      method: 'POST',
+                      headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                      alert('✅ SUCCESS!\n\n' + data.message + '\n\n📍 Validation URL:\n' + data.validationUrl + '\n\n📍 Confirmation URL:\n' + data.confirmationUrl);
+                    } else {
+                      alert('❌ Error: ' + data.error);
+                    }
+                  } catch (error) {
+                    alert('❌ Error: ' + error.message);
+                  }
+                }}
+                className="bg-purple-600 text-white px-6 py-3 rounded-lg hover:bg-purple-700 transition font-semibold flex items-center gap-2"
+              >
+                <span className="text-xl">🔧</span> Register C2B URLs
+              </button>
+            </div>
+          </div>
+        )}
+        
+        {/* STATS CARDS - NO EMPTY DIV HERE */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
           <div className="bg-gradient-to-br from-blue-500 to-blue-600 text-white p-6 rounded-xl shadow-lg">
             <div className="text-4xl mb-2">🏢</div>
             <div className="text-3xl font-bold">{stats.total_properties || 0}</div>
             <div className="text-blue-100">Properties</div>
           </div>
+          {/* ... rest of stats cards ... */}
           <div className="bg-gradient-to-br from-green-500 to-green-600 text-white p-6 rounded-xl shadow-lg">
             <div className="text-4xl mb-2">🏠</div>
             <div className="text-3xl font-bold">{stats.total_units || 0}</div>
@@ -2820,22 +2866,74 @@ const handleUnitSelection = (e) => {
       )}
 
       {/* M-PESA Payment Modal */}
-      {showMpesaModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-2xl font-bold text-gray-800">💰 Pay via M-PESA</h3>
-              <button
-                onClick={() => {
-                  setShowMpesaModal(false);
-                  setMpesaStatus(null);
-                  setMpesaForm({ phone: '', amount: '', lease_id: '' });
-                }}
-                className="text-gray-500 hover:text-gray-700 text-3xl font-bold"
-              >
-                ×
-              </button>
+{showMpesaModal && (
+  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+    <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6 max-h-[90vh] overflow-y-auto">
+      <div className="flex items-center justify-between mb-6">
+        <h3 className="text-2xl font-bold text-gray-800">💰 Pay via M-PESA</h3>
+        <button
+          onClick={() => {
+            setShowMpesaModal(false);
+            setMpesaStatus(null);
+            setMpesaForm({ phone: '', amount: '', lease_id: '' });
+          }}
+          className="text-gray-500 hover:text-gray-700 text-3xl font-bold"
+        >
+          ×
+        </button>
+      </div>
+
+      {/* ✅ ADD THIS ENTIRE SECTION HERE */}
+      <div className="mb-6 p-5 bg-blue-50 border-2 border-blue-300 rounded-lg">
+        <h3 className="font-bold text-blue-900 mb-3 flex items-center">
+          <span className="text-xl mr-2">💳</span>
+          Payment Options
+        </h3>
+        
+        <div className="space-y-4">
+          {/* Option 1: STK Push */}
+          <div className="bg-white p-3 rounded border border-blue-200">
+            <p className="font-semibold text-blue-900 mb-1">✅ Option 1: Automatic Payment (Recommended)</p>
+            <p className="text-sm text-blue-700">
+              Enter your phone number below and approve the M-PESA prompt
+            </p>
+          </div>
+          
+          {/* Option 2: Manual Payment */}
+          <div className="bg-white p-3 rounded border border-blue-200">
+            <p className="font-semibold text-blue-900 mb-2">📱 Option 2: Manual M-PESA Payment</p>
+            <div className="space-y-1 text-sm">
+              <div className="flex justify-between py-1 border-b border-blue-100">
+                <span className="text-blue-700">PayBill:</span>
+                <span className="font-bold text-blue-900">4182789</span>
+              </div>
+              <div className="flex justify-between py-1 border-b border-blue-100">
+                <span className="text-blue-700">Account Number:</span>
+                <span className="font-bold text-blue-900 font-mono">
+                  {(() => {
+                    const activeLease = leases.find(l => l.status === 'active' && l.tenant_id === user.tenant_id);
+                    return activeLease?.account_number || activeLease?.unit_name || 'N/A';
+                  })()}
+                </span>
+              </div>
+              <div className="flex justify-between py-1">
+                <span className="text-blue-700">Amount:</span>
+                <span className="font-bold text-blue-900">
+                  KES {mpesaForm.amount ? Number(mpesaForm.amount).toLocaleString() : '0'}
+                </span>
+              </div>
             </div>
+            <div className="mt-2 p-2 bg-yellow-50 rounded border border-yellow-200">
+              <p className="text-xs text-yellow-800">
+                ⚠️ <strong>Important:</strong> After paying manually, contact your landlord to update the system
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+      {/* ✅ END OF NEW SECTION */}
+
+      {/* Your existing mpesaStatus section continues here... */}
 
 {mpesaStatus && (
   <div className={`p-4 rounded-lg mb-4 ${

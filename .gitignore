@@ -1,0 +1,31 @@
+# Node modules
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Environment files (CRITICAL)
+.env
+*.env
+backend/.env
+frontend/.env
+
+# SQLite databases (CRITICAL)
+*.db
+backend/*.db
+frontend/*.db
+
+# Build folders
+frontend/build/
+backend/build/
+
+# Logs
+*.log
+npm-debug.log*
+pm2.log*
+
+# Cache
+frontend/node_modules/.cache/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,4 +1,5 @@
 const express = require('express');
+const { generateAccountNumber } = require('./account-number-generator');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -389,7 +390,7 @@ router.delete('/units/:id', authMiddleware, roleMiddleware('admin', 'landlord'),
 router.get('/units', authMiddleware, roleMiddleware('admin', 'landlord'), (req, res) => {
   try {
     const query = `
-      SELECT u.*, p.name as property_name, p.location as property_location
+      SELECT u.*, u.account_number, p.name as property_name, p.location as property_location
       FROM units u
       JOIN properties p ON u.property_id = p.id
       ${req.user.role === 'landlord' ? 'WHERE p.landlord_id = ?' : ''}
@@ -429,7 +430,7 @@ router.get('/units/available', authMiddleware, (req, res) => {
 
 router.post('/units', authMiddleware, roleMiddleware('admin', 'landlord'), (req, res) => {
   try {
-    const { property_id, name, rent_amount, deposit_amount, bedrooms, bathrooms } = req.body;
+    const { property_id, name, rent_amount, deposit_amount, bedrooms, bathrooms, description } = req.body; // ← ADD description HERE
 
     if (!property_id || !name || !rent_amount) {
       return res.status(400).json({ error: 'Property, name, and rent amount are required' });
@@ -442,10 +443,30 @@ router.post('/units', authMiddleware, roleMiddleware('admin', 'landlord'), (req,
       }
     }
 
+    // Get property name for account number generation
+    const property = db.prepare('SELECT name FROM properties WHERE id = ?').get(property_id);
+
+    if (!property) {
+      return res.status(404).json({ message: 'Property not found' });
+    }
+
+    // Generate account number
+    let accountNumber = generateAccountNumber(property.name, name);
+
+    // Check for duplicate account number
+    const existingAccount = db.prepare('SELECT id FROM units WHERE account_number = ?').get(accountNumber);
+
+    if (existingAccount) {
+      accountNumber = `${accountNumber}-${Date.now()}`;
+      console.log(`⚠️  Duplicate account number detected, using: ${accountNumber}`);
+    }
+
+    console.log(`✅ Creating unit with account number: ${accountNumber}`);
+
     const result = db.prepare(`
-      INSERT INTO units (property_id, name, rent_amount, deposit_amount, bedrooms, bathrooms, status)
-      VALUES (?, ?, ?, ?, ?, ?, 'vacant')
-    `).run(property_id, name, rent_amount, deposit_amount || 0, bedrooms || 1, bathrooms || 1);
+      INSERT INTO units (property_id, name, rent_amount, bedrooms, bathrooms, deposit_amount, description, status, account_number)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'vacant', ?)
+    `).run(property_id, name, rent_amount, bedrooms, bathrooms, deposit_amount, description || '', accountNumber); // ← Use description here
 
     console.log('✅ Unit created:', result.lastInsertRowid);
 
@@ -661,24 +682,6 @@ router.delete('/tenants/:id', authMiddleware, roleMiddleware('admin', 'landlord'
   }
 });
 
-router.delete('/tenants/:id', authMiddleware, roleMiddleware('admin', 'landlord'), (req, res) => {
-  try {
-    if (req.user.role === 'landlord') {
-      const tenant = db.prepare('SELECT * FROM tenants WHERE id = ? AND landlord_id = ?').get(req.params.id, req.user.id);
-      if (!tenant) {
-        return res.status(403).json({ error: 'Access denied' });
-      }
-    }
-
-    db.prepare('DELETE FROM tenants WHERE id = ?').run(req.params.id);
-
-    res.json({ message: 'Tenant deleted' });
-  } catch (error) {
-    console.error('Delete tenant error:', error);
-    res.status(500).json({ error: 'Failed to delete tenant' });
-  }
-});
-
 // 👇 ADD THIS NEW ROUTE HERE 👇
 router.put('/tenants/:id', authMiddleware, roleMiddleware('admin', 'landlord'), (req, res) => {
   try {
@@ -743,6 +746,7 @@ router.get('/leases', authMiddleware, (req, res) => {
           t.email as tenant_email,
           u.name as unit_name,
           p.name as property_name,
+          u.account_number,
           p.location as property_location
         FROM leases l
         JOIN tenants t ON l.tenant_id = t.id
@@ -760,6 +764,7 @@ router.get('/leases', authMiddleware, (req, res) => {
           t.email as tenant_email,
           u.name as unit_name,
           p.name as property_name,
+          u.account_number,
           p.location as property_location
         FROM leases l
         JOIN tenants t ON l.tenant_id = t.id
@@ -1189,97 +1194,6 @@ router.post('/leases/:id/terminate', authMiddleware, roleMiddleware('admin', 'la
   }
 });
 
-// Terminate lease route
-router.post('/leases/:id/terminate', authMiddleware, roleMiddleware('admin', 'landlord'), (req, res) => {
-  try {
-    console.log('🔴 Terminate lease request:', req.params.id);
-    const { termination_reason } = req.body;
-
-    if (!termination_reason || termination_reason.trim().length < 10) {
-      console.log('❌ Invalid reason:', termination_reason);
-      return res.status(400).json({ error: 'Please provide a detailed termination reason (minimum 10 characters)' });
-    }
-
-    const lease = db.prepare(`
-      SELECT l.*, p.landlord_id, u.id as unit_id, t.user_id as tenant_user_id, t.full_name as tenant_name
-      FROM leases l
-      JOIN units u ON l.unit_id = u.id
-      JOIN properties p ON u.property_id = p.id
-      JOIN tenants t ON l.tenant_id = t.id
-      WHERE l.id = ?
-    `).get(req.params.id);
-
-    console.log('📋 Lease found:', lease);
-
-    if (!lease) {
-      return res.status(404).json({ error: 'Lease not found' });
-    }
-
-    if (req.user.role === 'landlord' && lease.landlord_id !== req.user.id) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-
-    // Only allow terminating active leases
-    if (lease.status !== 'active') {
-      return res.status(400).json({ error: `Cannot terminate lease with status: ${lease.status}. Only active leases can be terminated.` });
-    }
-
-    // Update lease status
-    db.prepare(`
-      UPDATE leases 
-      SET status = 'terminated',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(req.params.id);
-
-    console.log('✅ Lease terminated:', req.params.id);
-
-    // Update unit to vacant
-    db.prepare('UPDATE units SET status = "vacant" WHERE id = ?').run(lease.unit_id);
-    console.log('✅ Unit marked as vacant:', lease.unit_id);
-
-    // Notify tenant
-    if (lease.tenant_user_id) {
-      try {
-        db.prepare(`
-          INSERT INTO notifications (user_id, title, message, type)
-          VALUES (?, ?, ?, ?)
-        `).run(
-          lease.tenant_user_id, 
-          'Lease Terminated', 
-          `Your lease has been terminated. Reason: ${termination_reason}`, 
-          'lease'
-        );
-        console.log('✅ Notification sent to tenant');
-      } catch (notifError) {
-        console.error('⚠️ Notification error:', notifError.message);
-      }
-    }
-
-    // Emit socket events
-    try {
-      const io = req.app.get('io');
-      if (io) {
-        io.emit('lease:terminated', { leaseId: req.params.id });
-        io.emit('dashboard:refresh');
-      }
-    } catch (socketError) {
-      console.error('⚠️ Socket error:', socketError.message);
-    }
-
-    res.json({ 
-      success: true,
-      message: 'Lease terminated successfully' 
-    });
-  } catch (error) {
-    console.error('❌ Terminate lease error:', error);
-    res.status(500).json({ 
-      error: 'Failed to terminate lease', 
-      details: error.message 
-    });
-  }
-});
-
 
 router.delete('/leases/:id', authMiddleware, roleMiddleware('admin', 'landlord'), (req, res) => {
   try {
@@ -1558,29 +1472,6 @@ const result = db.prepare(`
   } catch (error) {
     console.error('❌ Expense error:', error);
     res.status(500).json({ error: 'Failed to record expense', details: error.message });
-  }
-});
-
-router.delete('/expenses/:id', authMiddleware, roleMiddleware('admin', 'landlord'), (req, res) => {
-  try {
-    if (req.user.role === 'landlord') {
-      const expense = db.prepare(`
-        SELECT e.* FROM expenses e
-        JOIN properties p ON e.property_id = p.id
-        WHERE e.id = ? AND p.landlord_id = ?
-      `).get(req.params.id, req.user.id);
-
-      if (!expense) {
-        return res.status(403).json({ error: 'Access denied' });
-      }
-    }
-
-    db.prepare('DELETE FROM expenses WHERE id = ?').run(req.params.id);
-
-    res.json({ message: 'Expense deleted' });
-  } catch (error) {
-    console.error('Delete expense error:', error);
-    res.status(500).json({ error: 'Failed to delete expense' });
   }
 });
 
@@ -2003,6 +1894,7 @@ router.post('/sms/send', authMiddleware, roleMiddleware('admin', 'landlord'), as
 });
 
 // Send rent reminder SMS to all tenants with arrears
+// Send rent reminder SMS to all tenants with arrears
 router.post('/sms/rent-reminders', authMiddleware, roleMiddleware('admin', 'landlord'), async (req, res) => {
   try {
     console.log('📱 ========================================');
@@ -2017,7 +1909,6 @@ router.post('/sms/rent-reminders', authMiddleware, roleMiddleware('admin', 'land
       params.push(req.user.id);
     }
 
-    // USE THE EXACT SAME QUERY AS ARREARS REPORT
     const query = `
       SELECT 
         l.id as lease_id,
@@ -2027,19 +1918,15 @@ router.post('/sms/rent-reminders', authMiddleware, roleMiddleware('admin', 'land
         p.name as property_name,
         l.rent_amount,
         l.start_date,
-        -- Months elapsed
         CASE 
           WHEN julianday('now') < julianday(l.start_date) THEN 0
           ELSE CAST((julianday('now') - julianday(l.start_date)) / 30.0 + 0.999 AS INTEGER)
         END as months_elapsed,
-        -- Total paid
         COALESCE(SUM(pay.amount), 0) as total_paid,
-        -- Expected amount
         CASE 
           WHEN julianday('now') < julianday(l.start_date) THEN 0
           ELSE CAST((julianday('now') - julianday(l.start_date)) / 30.0 + 0.999 AS INTEGER) * l.rent_amount
         END as expected_amount,
-        -- Arrears
         (CASE 
           WHEN julianday('now') < julianday(l.start_date) THEN 0
           ELSE CAST((julianday('now') - julianday(l.start_date)) / 30.0 + 0.999 AS INTEGER) * l.rent_amount
@@ -2058,10 +1945,7 @@ router.post('/sms/rent-reminders', authMiddleware, roleMiddleware('admin', 'land
 
     const tenantsWithArrears = db.prepare(query).all(...params);
     
-    console.log(`📱 Found ${tenantsWithArrears.length} tenants with arrears:`);
-    tenantsWithArrears.forEach(t => {
-      console.log(`📱   ${t.tenant_name}: ${t.arrears_amount} arrears (Expected: ${t.expected_amount}, Paid: ${t.total_paid})`);
-    });
+    console.log(`📱 Found ${tenantsWithArrears.length} tenants with arrears`);
 
     if (tenantsWithArrears.length === 0) {
       return res.json({
@@ -2075,6 +1959,12 @@ router.post('/sms/rent-reminders', authMiddleware, roleMiddleware('admin', 'land
     let sent = 0;
     let failed = 0;
     const failedDetails = [];
+
+    // Get credentials
+    const apiClientID = process.env.BONGASMS_CLIENT_ID;
+    const key = process.env.BONGASMS_API_KEY;
+    const secret = process.env.BONGASMS_API_SECRET;
+    const serviceID = process.env.BONGASMS_SERVICE_ID;
 
     for (const tenant of tenantsWithArrears) {
       if (!tenant.tenant_phone) {
@@ -2091,31 +1981,40 @@ router.post('/sms/rent-reminders', authMiddleware, roleMiddleware('admin', 'land
       try {
         const FormData = require('form-data');
         const formData = new FormData();
-        formData.append('clientId', process.env.BONGASMS_CLIENT_ID);
-        formData.append('secret', process.env.BONGASMS_API_SECRET);
-        formData.append('msisdn', tenant.tenant_phone);
-        formData.append('message', message);
-        formData.append('serviceId', process.env.BONGASMS_SERVICE_ID);
-        formData.append('sender', process.env.BONGASMS_SENDER || 'SPIRALDART');
+        
+        formData.append('apiClientID', apiClientID);
+        formData.append('key', key);
+        formData.append('secret', secret);
+        formData.append('txtMessage', message);
+        formData.append('MSISDN', tenant.tenant_phone);
+        formData.append('serviceID', serviceID);
 
-        const response = await fetch('http://167.172.14.50:4002/v1/send-sms', {
-          method: 'POST',
-          body: formData,
+        console.log('📱 Sending SMS via BongaSMS...');
+        console.log('📱 Phone:', tenant.tenant_phone);
+        
+        // ✅ USE AXIOS INSTEAD OF FETCH!
+        const response = await axios.post('http://167.172.14.50:4002/v1/send-sms', formData, {
           headers: formData.getHeaders()
         });
 
-        const result = await response.json();
+        const result = response.data;
+        console.log('📱 BongaSMS Response:', result);
         
-        if (result.status === 222 || result.responseCode === 222) {
+        if (result.status === 222) {
           console.log(`✅ SMS sent to ${tenant.tenant_name}`);
           sent++;
         } else {
           console.log(`❌ SMS failed for ${tenant.tenant_name}:`, result);
           failed++;
-          failedDetails.push({ name: tenant.tenant_name, reason: result.message || 'SMS API error' });
+          failedDetails.push({ 
+            name: tenant.tenant_name, 
+            reason: result.status_message || 'SMS API error' 
+          });
         }
 
+        // Wait 1 second between messages
         await new Promise(resolve => setTimeout(resolve, 1000));
+        
       } catch (error) {
         console.error(`❌ Error sending to ${tenant.tenant_name}:`, error.message);
         failed++;
@@ -2142,37 +2041,38 @@ router.post('/sms/rent-reminders', authMiddleware, roleMiddleware('admin', 'land
 });
 
 
+
+// Check SMS Balance
+
 // Check SMS Balance
 router.get('/sms/balance', authMiddleware, roleMiddleware('admin', 'landlord'), async (req, res) => {
   try {
-    const clientId = process.env.BONGASMS_CLIENT_ID;
-    const apiKey = process.env.BONGASMS_API_KEY;
+    const apiClientID = process.env.BONGASMS_CLIENT_ID;
+    const key = process.env.BONGASMS_API_KEY;
 
-    if (!clientId || !apiKey) {
+    if (!apiClientID || !key) {
       return res.status(500).json({ error: 'SMS service not configured' });
     }
 
-    console.log('Checking balance with:', { clientId, apiKey: apiKey?.substring(0, 5) + '...' });
+    console.log('Checking balance with:', { apiClientID, key: key?.substring(0, 5) + '...' });
 
-    const response = await axios.get('http://167.172.14.50:4002/api/check-credits', {
-      params: {
-        apiClientID: clientId,
-        key: apiKey
-      },
-      timeout: 10000
-    });
+    // BongaSMS uses GET with query parameters
+    const response = await fetch(`https://app.bongasms.co.ke/api/check-credits?apiClientID=${apiClientID}&key=${key}`);
 
-    console.log('SMS Balance Response:', response.data);
+    const data = await response.json();
+    console.log('SMS Balance Response:', data);
 
-    if (response.data.status === 222) {
+    if (data.status === 222) {
       res.json({
         success: true,
-        balance: response.data.sms_credits,
-        clientName: response.data.client_name
+        balance: data.sms_credits,
+        clientName: data.client_name,
+        threshold: data.sms_threshold
       });
     } else {
       res.status(400).json({
-        error: response.data.status_message || 'Failed to check balance'
+        error: data.status_message || 'Failed to check balance',
+        details: data
       });
     }
 
@@ -2184,7 +2084,6 @@ router.get('/sms/balance', authMiddleware, roleMiddleware('admin', 'landlord'), 
     });
   }
 });
-
 
 
 // ============================================
@@ -3062,135 +2961,102 @@ router.post('/mpesa/callback', async (req, res) => {
   try {
     console.log('📞 ===== M-PESA CALLBACK RECEIVED =====');
     console.log(JSON.stringify(req.body, null, 2));
-    console.log('=====================================');
 
     const { Body } = req.body;
     const stkCallback = Body?.stkCallback;
 
     if (!stkCallback) {
-      console.log('⚠️ Invalid callback format - no stkCallback found');
+      console.log('⚠️ Invalid callback format');
       return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
     }
 
-    const { MerchantRequestID, CheckoutRequestID, ResultCode, ResultDesc } = stkCallback;
+    const { CheckoutRequestID, ResultCode, ResultDesc } = stkCallback;
 
-    console.log('🔍 Processing callback:', {
-      MerchantRequestID,
-      CheckoutRequestID,
-      ResultCode,
-      ResultDesc
-    });
+    console.log('🔍 Callback details:', { CheckoutRequestID, ResultCode, ResultDesc });
 
-    // Find transaction by CheckoutRequestID
+    // Find transaction - WAIT A BIT FOR DB
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
     const transaction = db.prepare(`
       SELECT * FROM mpesa_transactions 
       WHERE checkout_request_id = ?
     `).get(CheckoutRequestID);
 
     if (!transaction) {
-      console.log('⚠️ Transaction not found for CheckoutRequestID:', CheckoutRequestID);
+      console.log('⚠️ Transaction not found:', CheckoutRequestID);
       return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
     }
 
     console.log('✅ Transaction found:', transaction.id);
 
-    // ResultCode 0 = Success
     if (ResultCode === 0) {
-      console.log('✅ Payment was SUCCESSFUL');
+      console.log('✅ Payment SUCCESSFUL');
 
       const callbackMetadata = stkCallback.CallbackMetadata?.Item || [];
-      console.log('📦 Callback metadata items:', callbackMetadata.length);
-
       const mpesaReceiptNumber = callbackMetadata.find(item => item.Name === 'MpesaReceiptNumber')?.Value;
-      const transactionDate = callbackMetadata.find(item => item.Name === 'TransactionDate')?.Value;
-      const phoneNumber = callbackMetadata.find(item => item.Name === 'PhoneNumber')?.Value;
       const amount = callbackMetadata.find(item => item.Name === 'Amount')?.Value;
+      const phoneNumber = callbackMetadata.find(item => item.Name === 'PhoneNumber')?.Value;
 
-      console.log('💰 Payment details:', {
-        receipt: mpesaReceiptNumber,
-        amount: amount,
-        phone: phoneNumber,
-        date: transactionDate
-      });
+      console.log('💰 Details:', { receipt: mpesaReceiptNumber, amount, phone: phoneNumber });
 
-      // Update M-PESA transaction to completed
+      // Update transaction
       db.prepare(`
         UPDATE mpesa_transactions 
         SET status = 'completed',
             mpesa_receipt_number = ?,
-            transaction_date = CURRENT_TIMESTAMP,
             result_code = ?,
             result_desc = ?,
-            callback_received = 1,
-            updated_at = CURRENT_TIMESTAMP
+            callback_received = 1
         WHERE id = ?
       `).run(mpesaReceiptNumber, ResultCode, ResultDesc, transaction.id);
 
-      console.log('✅ M-PESA transaction updated to completed');
+      console.log('✅ Transaction updated');
 
-      // Create payment record
+      // Create payment
       if (transaction.lease_id) {
-        try {
-          const paymentResult = db.prepare(`
-            INSERT INTO payments 
-            (lease_id, amount, payment_date, payment_method, reference_number, notes, status)
-            VALUES (?, ?, ?, 'mpesa', ?, ?, 'completed')
-          `).run(
-            transaction.lease_id,
-            amount,
-            new Date().toISOString().split('T')[0],
-            mpesaReceiptNumber,
-            `M-PESA Payment - ${mpesaReceiptNumber}`
-          );
+        db.prepare(`
+          INSERT INTO payments 
+          (lease_id, amount, payment_date, payment_method, reference_number, notes, status)
+          VALUES (?, ?, date('now'), 'mpesa', ?, ?, 'completed')
+        `).run(
+          transaction.lease_id,
+          amount,
+          mpesaReceiptNumber,
+          `M-PESA STK - ${mpesaReceiptNumber}`
+        );
 
-          console.log('✅ Payment record created:', paymentResult.lastInsertRowid);
+        console.log('✅ Payment created');
 
-          // Emit socket events
-          const io = req.app.get('io');
-          if (io) {
-            console.log('📡 Emitting socket events...');
-            io.emit('payment:created', { 
-              leaseId: transaction.lease_id, 
-              amount: amount,
-              receipt: mpesaReceiptNumber 
-            });
-            io.emit('dashboard:refresh');
-          }
-
-        } catch (paymentError) {
-          console.error('⚠️ Failed to create payment record:', paymentError);
-          console.error('⚠️ Error details:', paymentError.message);
+        // Emit events
+        const io = req.app.get('io');
+        if (io) {
+          io.emit('payment:created', { 
+            leaseId: transaction.lease_id, 
+            amount: amount,
+            receipt: mpesaReceiptNumber 
+          });
+          io.emit('dashboard:refresh');
         }
-      } else {
-        console.log('⚠️ No lease_id associated with transaction');
       }
 
     } else {
-      // Payment failed or cancelled
-      console.log('❌ Payment FAILED or CANCELLED');
-      console.log('❌ Result Code:', ResultCode);
-      console.log('❌ Result Description:', ResultDesc);
-
+      console.log('❌ Payment FAILED:', ResultDesc);
+      
       db.prepare(`
         UPDATE mpesa_transactions 
         SET status = 'failed',
             result_code = ?,
             result_desc = ?,
-            callback_received = 1,
-            updated_at = CURRENT_TIMESTAMP
+            callback_received = 1
         WHERE id = ?
       `).run(ResultCode, ResultDesc, transaction.id);
-
-      console.log('✅ Transaction marked as failed');
     }
 
-    // Always return success to Safaricom
+    console.log('=====================================');
     res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
 
   } catch (error) {
-    console.error('❌ Callback processing error:', error);
-    console.error('❌ Error stack:', error.stack);
-    // Still return success to avoid Safaricom retries
+    console.error('❌ Callback error:', error);
     res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
   }
 });
@@ -3232,5 +3098,171 @@ router.get('/mpesa/transaction/:id', authMiddleware, async (req, res) => {
   }
 });
 
+// ============================================
+// M-PESA C2B (Customer to Business) ROUTES
+// For automatic processing of manual PayBill payments
+// ============================================
+
+// C2B Validation Callback
+router.post('/mpesa/c2b/validation', async (req, res) => {
+  console.log('📞 ===== M-PESA C2B VALIDATION =====');
+  console.log(JSON.stringify(req.body, null, 2));
+  console.log('=====================================');
+  
+  // Always accept
+  res.json({
+    ResultCode: 0,
+    ResultDesc: 'Accepted'
+  });
+});
+
+// C2B Confirmation Callback
+router.post('/mpesa/c2b/confirmation', async (req, res) => {
+  try {
+    console.log('📞 ===== M-PESA C2B CONFIRMATION =====');
+    console.log(JSON.stringify(req.body, null, 2));
+
+    const {
+      TransID,
+      TransAmount,
+      BillRefNumber,
+      MSISDN,
+      FirstName,
+      MiddleName,
+      LastName
+    } = req.body;
+
+    const accountNumber = BillRefNumber?.trim();
+    
+    console.log(`💰 Payment: KES ${TransAmount} → Account: ${accountNumber}`);
+
+    if (!accountNumber) {
+      console.log('⚠️ No account number provided');
+      return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+    }
+
+    // Find unit by account number
+    const unit = db.prepare(`
+      SELECT u.*, p.name as property_name, p.landlord_id
+      FROM units u
+      JOIN properties p ON u.property_id = p.id
+      WHERE u.account_number = ?
+    `).get(accountNumber);
+
+    if (!unit) {
+      console.log(`⚠️ Unit not found for: ${accountNumber}`);
+      return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+    }
+
+    console.log(`✅ Unit: ${unit.name} (${unit.property_name})`);
+
+    // Find active lease
+    const lease = db.prepare(`
+      SELECT l.*, t.full_name as tenant_name
+      FROM leases l
+      JOIN tenants t ON l.tenant_id = t.id
+      WHERE l.unit_id = ? AND l.status = 'active'
+      LIMIT 1
+    `).get(unit.id);
+
+    if (!lease) {
+      console.log(`⚠️ No active lease for unit ${unit.name}`);
+      return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+    }
+
+    console.log(`✅ Tenant: ${lease.tenant_name}`);
+
+    // Create M-PESA transaction record
+    db.prepare(`
+      INSERT INTO mpesa_transactions 
+      (lease_id, tenant_id, phone_number, amount, account_reference, 
+       mpesa_receipt_number, transaction_date, status, result_code, result_desc, callback_received)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 'completed', 0, 'C2B Manual Payment', 1)
+    `).run(
+      lease.id,
+      lease.tenant_id,
+      MSISDN || '',
+      TransAmount,
+      accountNumber,
+      TransID
+    );
+
+    console.log(`✅ M-PESA transaction saved`);
+
+    // Create payment record
+    db.prepare(`
+      INSERT INTO payments 
+      (lease_id, amount, payment_date, payment_method, reference_number, notes, status)
+      VALUES (?, ?, date('now'), 'mpesa', ?, ?, 'completed')
+    `).run(
+      lease.id,
+      TransAmount,
+      TransID,
+      `Auto C2B Payment: ${FirstName || ''} ${LastName || ''} - ${TransID}`
+    );
+
+    console.log(`✅ Payment recorded automatically!`);
+
+    // Emit socket events
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('payment:created', { 
+        leaseId: lease.id, 
+        amount: TransAmount,
+        receipt: TransID,
+        type: 'c2b_auto'
+      });
+      io.emit('dashboard:refresh');
+    }
+
+    console.log('✅ C2B PAYMENT PROCESSED SUCCESSFULLY!');
+    console.log('=====================================');
+
+    res.json({
+      ResultCode: 0,
+      ResultDesc: 'Accepted'
+    });
+
+  } catch (error) {
+    console.error('❌ C2B confirmation error:', error);
+    res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+  }
+});
+
+// Register C2B URLs (Admin only - run ONCE)
+router.post('/mpesa/c2b/register', authMiddleware, roleMiddleware('admin'), async (req, res) => {
+  try {
+    const mpesaC2B = require('./mpesa-c2b-service');
+    
+    const baseUrl = process.env.APP_URL;
+    
+    if (!baseUrl || baseUrl.includes('localhost')) {
+      return res.status(400).json({
+        success: false,
+        error: '⚠️ APP_URL must be a public URL (use ngrok). Current: ' + baseUrl
+      });
+    }
+    
+    const validationUrl = `${baseUrl}/api/mpesa/c2b/validation`;
+    const confirmationUrl = `${baseUrl}/api/mpesa/c2b/confirmation`;
+
+    console.log('🔧 Attempting C2B registration...');
+    const result = await mpesaC2B.registerC2BUrls(validationUrl, confirmationUrl);
+
+    res.json({
+      success: true,
+      message: '✅ C2B URLs registered! Manual PayBill payments will now auto-update.',
+      validationUrl,
+      confirmationUrl,
+      result
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.data
+    });
+  }
+});
 
 module.exports = router;
