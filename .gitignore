@@ -14,8 +14,14 @@ frontend/.env
 backend/*.db
 frontend/*.db
 
+# Uploads
+uploads/
+backend/uploads/
+frontend/uploads/
+
 # Build folders
 frontend/build/
+frontend/dist/
 backend/build/
 
 # Logs
@@ -25,6 +31,9 @@ pm2.log*
 
 # Cache
 frontend/node_modules/.cache/
+
+# Coverage
+coverage/
 
 # OS files
 .DS_Store
