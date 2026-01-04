@@ -10,9 +10,9 @@ backend/.env
 frontend/.env
 
 # SQLite databases (CRITICAL)
-*.db
-backend/*.db
-frontend/*.db
+#*.db
+#backend/*.db
+#frontend/*.db
 
 # Uploads
 uploads/
